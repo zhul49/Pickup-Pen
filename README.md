@@ -34,11 +34,11 @@ Run the calibration script:
 
 python3 main.py
 
-    The robot moves to several pre-set positions.
+The robot moves to several pre-set positions.
 
-    The RealSense camera observes the pen.
+The RealSense camera observes the pen.
 
-    Calibration parameters are computed to transform coordinates between the camera and robot frames.
+Calibration parameters are computed to transform coordinates between the camera and robot frames.
 
 4. Track and Grab the Pen
 
@@ -46,6 +46,6 @@ Once calibration is complete, run:
 
 python3 grab_pen.py
 
-    The RealSense camera detects and tracks the pen in real time.
+The RealSense camera detects and tracks the pen in real time.
 
-    The robot uses the calibration to move its end effector toward the pen and attempt to grab it.
+The robot uses the calibration to move its end effector toward the pen and attempt to grab it.
