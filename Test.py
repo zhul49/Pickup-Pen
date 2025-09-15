@@ -22,13 +22,11 @@ class RealSenseCapture:
         self.config = rs.config()
 
         if self.playback_file:
-            # Load from file (no repeat, deterministic timing)
             try:
                 self.config.enable_device_from_file(self.playback_file, False)
             except TypeError:
                 self.config.enable_device_from_file(self.playback_file)
         else:
-            # Live streaming
             self.config.enable_stream(rs.stream.depth, self.width, self.height, rs.format.z16, 30)
             self.config.enable_stream(rs.stream.color, self.width, self.height, rs.format.bgr8, 30)
 
@@ -96,56 +94,107 @@ def main():
         align_to=args.align,
     ) as cam:
         cv2.namedWindow(args.window, cv2.WINDOW_NORMAL)
+
+        depth_sensor = cam.profile.get_device().first_depth_sensor()
+        depth_scale = depth_sensor.get_depth_scale()
+        clipping_distance_in_meters = 1.5
+        clipping_distance = clipping_distance_in_meters / depth_scale
+        grey_color = 153
+
+        smoothed_px, smoothed_py = None, None
+        ema_keep = 0.8 
+
         while True:
             try:
-                color_image, depth_image, depth_colormap = cam.get_images()
+                aligned_deapth_frame, color_frame = cam.get_aligned_frames()
+                aligned_depth_frame = aligned_deapth_frame
             except rs.error as e:
-                # End of playback or device error
                 print(f"[RealSense] {e}")
                 break
-            # Getting the depth sensor's depth scale (see rs-align example for explanation)
-            depth_sensor = cam.profile.get_device().first_depth_sensor()
-            depth_scale = depth_sensor.get_depth_scale()
 
-            clipping_distance_in_meters = 1.5 #1 meter
-            clipping_distance = clipping_distance_in_meters / depth_scale
+            if not aligned_depth_frame or not color_frame:
+                continue
 
-            # Remove background - Set pixels further than clipping_distance to grey
-            grey_color = 153
-            depth_image_3d = np.dstack((depth_image,depth_image,depth_image)) #depth image is 1 channel, color is 3 channels
-            bg_removed = np.where((depth_image_3d > clipping_distance) | (depth_image_3d <= 0), grey_color, color_image)
+            color_image = np.asanyarray(color_frame.get_data())
+            depth_image = np.asanyarray(aligned_depth_frame.get_data())
+
+            depth_image_3d = np.dstack((depth_image, depth_image, depth_image))
+            bg_removed = np.where(
+                (depth_image_3d > clipping_distance) | (depth_image_3d <= 0),
+                grey_color,
+                color_image,
+            )
 
             hsv = cv2.cvtColor(bg_removed, cv2.COLOR_BGR2HSV)
             lower_purple = np.array([115, 50, 50], dtype=np.uint8)
             upper_purple = np.array([175, 255, 255], dtype=np.uint8)
-
             mask = cv2.inRange(hsv, lower_purple, upper_purple)
-            kernel = np.ones((3, 3), np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
+            mask = cv2.dilate(mask, k, iterations=1)
 
             purple_filter = cv2.bitwise_and(bg_removed, bg_removed, mask=mask)
 
-            imgray = cv2.cvtColor(purple_filter, cv2.COLOR_BGR2GRAY)
-            edged = cv2.Canny(imgray, 30, 200)
-            ret, thresh = cv2.threshold(imgray, 127, 255, 0)
-            contours, hierarchy = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-            cv2.drawContours(purple_filter, contours, -1, (0,255,0), 3)
+            cv2.drawContours(purple_filter, contours, -1, (0, 255, 0), 1)
 
-            images = np.hstack((purple_filter, bg_removed))
+            if contours:
+                # largest contour only
+                c = max(contours, key=cv2.contourArea)
+                area = cv2.contourArea(c)
+                if area > 150:
+                    cx, cy = None, None
+
+                    if len(c) >= 5:
+                        (ex, ey), (MA, ma), angle = cv2.fitEllipse(c)
+                        cx, cy = int(round(ex)), int(round(ey))
+                        cv2.ellipse(purple_filter, ((ex, ey), (MA, ma), angle), (0, 255, 255), 2)
+                    else:
+                        M = cv2.moments(c)
+                        if M["m00"] != 0:
+                            cx = int(M["m10"] / M["m00"])
+                            cy = int(M["m01"] / M["m00"])
+                        else:
+                            x, y, w, h = cv2.boundingRect(c)
+                            cx, cy = x + w // 2, y + h // 2
+
+
+                    d = aligned_depth_frame.get_distance(cx, cy)
+                    if d == 0.0:
+                        roi = depth_image[max(cy - 3, 0): cy + 4, max(cx - 3, 0): cx + 4]
+                        nz = roi[roi > 0]
+                        if nz.size > 0:
+                            d = float(np.median(nz) * depth_scale)
+
+                    if d > 0.0:
+                        intr = aligned_depth_frame.profile.as_video_stream_profile().intrinsics
+                        X, Y, Z = rs.rs2_deproject_pixel_to_point(intr, [cx, cy], d)
+                        cv2.circle(purple_filter, (cx, cy), 6, (0, 0, 255), -1)
+                        overlay = f"px=({cx},{cy})  XYZ(m)=({X:.3f}, {Y:.3f}, {Z:.3f})"
+                        cv2.putText(purple_filter, overlay, (10, 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                        print(f"Centroid px=({cx},{cy})  XYZ [m]=({X:.4f}, {Y:.4f}, {Z:.4f})")
+                    else:
+                        cv2.putText(purple_filter, "No valid depth at centroid", (10, 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+            images = np.hstack((purple_filter, color_image))
             cv2.imshow(args.window, images)
 
-            if use_poll:
-                k = cv2.pollKey()
-            else:
-                k = cv2.waitKey(1)
-
+            k = cv2.pollKey() if use_poll else cv2.waitKey(1)
             if k == quit_code or k == 27:
                 break
 
     cv2.destroyAllWindows()
 
-
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
