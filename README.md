@@ -18,7 +18,6 @@ This project demonstrates how to calibrate an Interbotix PX100 robot arm with an
 ### 1. Launch the Robot Control Node
 In a **separate terminal**, start the Interbotix control node:
 
-```bash
 ros2 launch interbotix_xsarm_control xsarm_control.launch.py robot_model:=px100
 
 This launches the ROS 2 driver for the PX100 arm.
